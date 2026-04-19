@@ -11,7 +11,7 @@ app = Flask(__name__)
 # --- Global State & Threading ---
 bot_state = {
     "username": "",
-    "password": "",
+    "sessionid": "",
     "urls": [],
     "comments": [],
     "proxies": [],
@@ -25,7 +25,7 @@ bot_thread = None
 def add_log(message):
     print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
-    # Keep only the last 50 logs in memory to prevent slowing down the browser
+    # Keep only the last 50 logs in memory
     if len(bot_state["logs"]) > 50:
         bot_state["logs"].pop()
 
@@ -43,7 +43,6 @@ def format_proxy(raw_proxy):
         parts = rest.split(":")
         if len(parts) == 4:
             host, port, user, password = parts
-            # Strictly use SOCKS5 protocol
             return f"socks5://{user}:{password}@{host}:{port}"
         
         return raw_proxy
@@ -57,9 +56,6 @@ def commenting_worker():
     
     cl = Client()
     login_successful = False
-    
-    # Create a unique session file name for this account
-    session_file = f"session_{bot_state['username']}.json"
 
     while not stop_event.is_set():
         try:
@@ -73,26 +69,17 @@ def commenting_worker():
                     safe_log_proxy = formatted_proxy.split('@')[-1]
                     add_log(f"Using Proxy: {safe_log_proxy}")
 
-            # 2. Login Logic (With Session Saving)
+            # 2. Login Logic (Using Session ID)
             if not login_successful:
-                if os.path.exists(session_file):
-                    add_log("Found existing session file, attempting to load...")
-                    cl.load_settings(session_file)
-                    try:
-                        # Test if the session is still valid
-                        cl.get_timeline_feed()
-                        login_successful = True
-                        add_log("Logged in successfully using saved session cookie!")
-                    except Exception:
-                        add_log("Saved session expired or invalid. Re-logging in...")
-                        login_successful = False
-
-                if not login_successful:
-                    add_log(f"Attempting fresh password login for {bot_state['username']}...")
-                    cl.login(bot_state["username"], bot_state["password"])
-                    cl.dump_settings(session_file) # Save session for next time
-                    login_successful = True
-                    add_log("Fresh login successful! Session saved.")
+                add_log(f"Attempting login using Session ID for {bot_state['username']}...")
+                
+                # Clean the session ID of any accidental spaces or newlines
+                clean_session = bot_state["sessionid"].replace("\n", "").replace(" ", "").strip()
+                
+                # Login bypasses the password screen entirely
+                cl.login_by_sessionid(clean_session)
+                login_successful = True
+                add_log("Session ID Login Successful! Bypassed security.")
 
             # 3. Process URLs
             for url in bot_state["urls"]:
@@ -104,7 +91,7 @@ def commenting_worker():
                 
                 try:
                     media_id = cl.media_id(cl.media_pk_from_url(url))
-                    comment_obj = cl.media_comment(media_id, comment)
+                    cl.media_comment(media_id, comment)
                     add_log(f"SUCCESS: Commented '{comment}' on {url}")
                 except Exception as e:
                     add_log(f"FAILED on {url} - {str(e)[:100]}")
@@ -127,12 +114,6 @@ def commenting_worker():
             
             login_successful = False # Force a re-login check on next loop
             
-            # Delete corrupted session file if Instagram blocked the session
-            if "challenge" in error_msg.lower() or "blacklist" in error_msg.lower() or "login" in error_msg.lower():
-                 if os.path.exists(session_file):
-                     os.remove(session_file)
-                     add_log("Deleted invalid session file. Will perform fresh login next cycle.")
-                     
             for _ in range(60):
                 if stop_event.is_set(): break
                 time.sleep(1)
@@ -177,13 +158,13 @@ HTML_TEMPLATE = """
                 <h4 class="mb-3 text-light">Configuration</h4>
                 <form id="configForm">
                     <div class="row mb-3">
-                        <div class="col">
+                        <div class="col-4">
                             <label class="form-label text-secondary small mb-1">IG Username</label>
-                            <input type="text" id="username" class="form-control" required>
+                            <input type="text" id="username" class="form-control" placeholder="username" required>
                         </div>
-                        <div class="col">
-                            <label class="form-label text-secondary small mb-1">IG Password</label>
-                            <input type="password" id="password" class="form-control" required>
+                        <div class="col-8">
+                            <label class="form-label text-warning small mb-1">IG Session ID (Cookie)</label>
+                            <input type="password" id="sessionid" class="form-control" placeholder="Paste long session cookie here..." required>
                         </div>
                     </div>
                     <div class="mb-3">
@@ -195,8 +176,8 @@ HTML_TEMPLATE = """
                         <textarea id="comments" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (One per line)</label>
-                        <textarea id="proxies" class="form-control" rows="3" placeholder="socks5://change4.owlproxy.com..."></textarea>
+                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (Extract 4 lines at 90m rotation)</label>
+                        <textarea id="proxies" class="form-control" rows="3" placeholder="Agreement://Host IP:Port:Username:Password"></textarea>
                     </div>
                     <button type="submit" class="btn btn-primary w-100 mb-3 fw-bold">Save Configuration</button>
                 </form>
@@ -226,7 +207,7 @@ HTML_TEMPLATE = """
             e.preventDefault();
             const data = {
                 username: document.getElementById('username').value,
-                password: document.getElementById('password').value,
+                sessionid: document.getElementById('sessionid').value,
                 urls: document.getElementById('urls').value.split('\\n').filter(u => u.trim()),
                 comments: document.getElementById('comments').value.split('\\n').filter(c => c.trim()),
                 proxies: document.getElementById('proxies').value.split('\\n').filter(p => p.trim())
@@ -237,7 +218,7 @@ HTML_TEMPLATE = """
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data)
             });
-            alert('Configuration Saved To Memory!');
+            alert('Configuration Saved! Ready to Start.');
         });
 
         async function startBot() {
@@ -256,15 +237,13 @@ HTML_TEMPLATE = """
             
             const badge = document.getElementById('statusBadge');
             badge.innerText = data.status;
-            
-            // Update badge color based on status
             badge.className = 'badge fs-6 ' + (data.status === 'Running' ? 'bg-success' : 'bg-danger');
 
             const logBox = document.getElementById('logBox');
             logBox.innerHTML = data.logs.join('<br>');
         }
 
-        setInterval(updateUI, 2000); // Auto-refresh logs every 2 seconds
+        setInterval(updateUI, 2000);
     </script>
 </body>
 </html>
@@ -278,7 +257,7 @@ def index():
 def update_config():
     data = request.json
     bot_state["username"] = data.get("username", "")
-    bot_state["password"] = data.get("password", "")
+    bot_state["sessionid"] = data.get("sessionid", "")
     bot_state["urls"] = data.get("urls", [])
     bot_state["comments"] = data.get("comments", [])
     bot_state["proxies"] = data.get("proxies", [])
@@ -290,7 +269,7 @@ def start_bot():
     if bot_state["status"] == "Running":
         return jsonify({"error": "Already running"})
     
-    if not bot_state["username"] or not bot_state["urls"] or not bot_state["comments"]:
+    if not bot_state["username"] or not bot_state["sessionid"] or not bot_state["urls"]:
         return jsonify({"error": "Missing configuration"})
 
     stop_event.clear()
