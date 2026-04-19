@@ -28,17 +28,30 @@ def add_log(message):
         bot_state["logs"].pop()
 
 def format_proxy(raw_proxy):
-    """Converts OwlProxy format (host:port:user:pass) to standard (user:pass@host:port)"""
+    """
+    Converts OwlProxy format to a standard HTTP format.
+    Instagrapi (via the requests library) handles HTTP proxies much more 
+    stably than SOCKS5, preventing the 'NoneType' JSON parsing crashes.
+    """
     try:
         raw_proxy = raw_proxy.strip()
         if not raw_proxy: return None
-        protocol, rest = raw_proxy.split("://")
+        
+        # Strip out the protocol if it exists
+        if "://" in raw_proxy:
+            rest = raw_proxy.split("://")[1]
+        else:
+            rest = raw_proxy
+            
         parts = rest.split(":")
         if len(parts) == 4:
             host, port, user, password = parts
-            return f"{protocol}://{user}:{password}@{host}:{port}"
+            # Force HTTP protocol for maximum compatibility
+            return f"http://{user}:{password}@{host}:{port}"
+        
         return raw_proxy
-    except Exception:
+    except Exception as e:
+        add_log(f"Proxy Parse Error: {e}")
         return None
 
 def commenting_worker():
@@ -54,9 +67,12 @@ def commenting_worker():
             if bot_state["proxies"]:
                 raw_proxy = random.choice(bot_state["proxies"])
                 formatted_proxy = format_proxy(raw_proxy)
+                
                 if formatted_proxy:
                     cl.set_proxy(formatted_proxy)
-                    add_log(f"Using Proxy: {formatted_proxy.split('@')[1]}")
+                    # Safely log the proxy host/port without exposing the password
+                    safe_log_proxy = formatted_proxy.split('@')[-1]
+                    add_log(f"Using Proxy: {safe_log_proxy}")
 
             # 2. Login (Only if not already logged in)
             if not login_successful:
@@ -79,7 +95,7 @@ def commenting_worker():
                     comment_obj = cl.media_comment(media_id, comment)
                     add_log(f"SUCCESS: Commented '{comment}' on {url}")
                 except Exception as e:
-                    add_log(f"FAILED on {url} - {str(e)[:50]}")
+                    add_log(f"FAILED on {url} - {str(e)[:100]}")
 
                 # Anti-Ban Delay between comments (30 to 60 seconds)
                 delay = random.randint(30, 60)
@@ -92,6 +108,8 @@ def commenting_worker():
             time.sleep(10) # Pause before restarting the loop
 
         except Exception as e:
+            # Print full traceback to console for deep debugging
+            traceback.print_exc()
             add_log(f"CRITICAL ERROR: {str(e)}")
             add_log("Cooling down for 60 seconds before retrying...")
             login_successful = False # Force re-login
@@ -107,66 +125,83 @@ def commenting_worker():
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMM Auto-Comment Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { background-color: #121212; color: #ffffff; }
-        .card { background-color: #1e1e1e; border: none; }
-        .form-control { background-color: #2d2d2d; color: #fff; border: 1px solid #444; }
-        .form-control:focus { background-color: #333; color: #fff; }
-        .log-box { height: 300px; overflow-y: scroll; background: #000; padding: 10px; font-family: monospace; color: #0f0; border-radius: 5px; }
+        body { padding-top: 20px; }
+        .log-box { 
+            height: 350px; 
+            overflow-y: scroll; 
+            background: #0d1117; 
+            padding: 15px; 
+            font-family: 'Courier New', Courier, monospace; 
+            color: #00ff00; 
+            border-radius: 8px; 
+            border: 1px solid #30363d;
+            font-size: 14px;
+        }
+        textarea { font-family: monospace; }
+        .card { box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
     </style>
 </head>
-<body class="container py-4">
-    <h2 class="mb-4 text-center text-primary">SMM Comment Automation</h2>
+<body class="container">
+    <h2 class="mb-4 text-center text-info fw-bold">SMM Comment Automation</h2>
     
     <div class="row">
-        <div class="col-md-6 mb-4">
+        <div class="col-lg-6 mb-4">
             <div class="card p-4">
-                <h4>Configuration</h4>
+                <h4 class="mb-3 text-light">Configuration</h4>
                 <form id="configForm">
                     <div class="row mb-3">
-                        <div class="col"><input type="text" id="username" class="form-control" placeholder="IG Username" required></div>
-                        <div class="col"><input type="password" id="password" class="form-control" placeholder="IG Password" required></div>
+                        <div class="col">
+                            <label class="form-label text-secondary small mb-1">IG Username</label>
+                            <input type="text" id="username" class="form-control" required>
+                        </div>
+                        <div class="col">
+                            <label class="form-label text-secondary small mb-1">IG Password</label>
+                            <input type="password" id="password" class="form-control" required>
+                        </div>
                     </div>
                     <div class="mb-3">
-                        <label>Video URLs (One per line)</label>
+                        <label class="form-label text-secondary small mb-1">Video URLs (One per line)</label>
                         <textarea id="urls" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label>Comments (One per line)</label>
+                        <label class="form-label text-secondary small mb-1">Comments (One per line)</label>
                         <textarea id="comments" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label>SOCKS5 Proxies (One per line)</label>
+                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (One per line)</label>
                         <textarea id="proxies" class="form-control" rows="3" placeholder="socks5://change4.owlproxy.com..."></textarea>
                     </div>
-                    <button type="submit" class="btn btn-primary w-100 mb-2">Save Configuration</button>
+                    <button type="submit" class="btn btn-primary w-100 mb-3 fw-bold">Save Configuration</button>
                 </form>
                 
-                <div class="d-flex gap-2 mt-3">
-                    <button onclick="startBot()" class="btn btn-success flex-grow-1">START BOT</button>
-                    <button onclick="stopBot()" class="btn btn-danger flex-grow-1">STOP BOT</button>
+                <div class="d-flex gap-2">
+                    <button onclick="startBot()" class="btn btn-success flex-grow-1 fw-bold py-2">START BOT</button>
+                    <button onclick="stopBot()" class="btn btn-danger flex-grow-1 fw-bold py-2">STOP BOT</button>
                 </div>
             </div>
         </div>
 
-        <div class="col-md-6">
-            <div class="card p-4">
-                <h4>Status: <span id="statusBadge" class="badge bg-secondary">Stopped</span></h4>
-                <hr>
-                <h5>Live Logs</h5>
+        <div class="col-lg-6">
+            <div class="card p-4 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h4 class="m-0 text-light">Status Dashboard</h4>
+                    <span id="statusBadge" class="badge bg-secondary fs-6">Stopped</span>
+                </div>
+                <hr class="mt-0">
+                <h5 class="text-secondary mb-3">Live Terminal</h5>
                 <div id="logBox" class="log-box"></div>
             </div>
         </div>
     </div>
 
     <script>
-        // Handle Form Submission
         document.getElementById('configForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const data = {
@@ -182,35 +217,34 @@ HTML_TEMPLATE = """
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data)
             });
-            alert('Configuration Saved!');
+            alert('Configuration Saved To Memory!');
         });
 
-        // Start Bot
         async function startBot() {
             await fetch('/api/start', {method: 'POST'});
             updateUI();
         }
 
-        // Stop Bot
         async function stopBot() {
             await fetch('/api/stop', {method: 'POST'});
             updateUI();
         }
 
-        // Update Logs and Status automatically
         async function updateUI() {
             const res = await fetch('/api/status');
             const data = await res.json();
             
             const badge = document.getElementById('statusBadge');
             badge.innerText = data.status;
-            badge.className = data.status === 'Running' ? 'badge bg-success' : 'badge bg-danger';
+            
+            // Update badge color based on status
+            badge.className = 'badge fs-6 ' + (data.status === 'Running' ? 'bg-success' : 'bg-danger');
 
             const logBox = document.getElementById('logBox');
             logBox.innerHTML = data.logs.join('<br>');
         }
 
-        setInterval(updateUI, 2000); // Refresh logs every 2 seconds
+        setInterval(updateUI, 2000); // Auto-refresh logs every 2 seconds
     </script>
 </body>
 </html>
@@ -260,6 +294,4 @@ def get_status():
     })
 
 if __name__ == "__main__":
-    # Host 0.0.0.0 makes it accessible on Render or Termux local network
     app.run(host="0.0.0.0", port=5000, debug=True)
-
