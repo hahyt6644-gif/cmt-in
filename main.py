@@ -4,6 +4,7 @@ import threading
 import time
 import random
 import traceback
+import os
 
 app = Flask(__name__)
 
@@ -24,20 +25,16 @@ bot_thread = None
 def add_log(message):
     print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
+    # Keep only the last 50 logs in memory to prevent slowing down the browser
     if len(bot_state["logs"]) > 50:
         bot_state["logs"].pop()
 
 def format_proxy(raw_proxy):
-    """
-    Converts OwlProxy format to a standard HTTP format.
-    Instagrapi (via the requests library) handles HTTP proxies much more 
-    stably than SOCKS5, preventing the 'NoneType' JSON parsing crashes.
-    """
+    """Converts OwlProxy format to standard Requests SOCKS5 format"""
     try:
         raw_proxy = raw_proxy.strip()
         if not raw_proxy: return None
         
-        # Strip out the protocol if it exists
         if "://" in raw_proxy:
             rest = raw_proxy.split("://")[1]
         else:
@@ -46,8 +43,8 @@ def format_proxy(raw_proxy):
         parts = rest.split(":")
         if len(parts) == 4:
             host, port, user, password = parts
-            # Force HTTP protocol for maximum compatibility
-            return f"http://{user}:{password}@{host}:{port}"
+            # Strictly use SOCKS5 protocol
+            return f"socks5://{user}:{password}@{host}:{port}"
         
         return raw_proxy
     except Exception as e:
@@ -60,6 +57,9 @@ def commenting_worker():
     
     cl = Client()
     login_successful = False
+    
+    # Create a unique session file name for this account
+    session_file = f"session_{bot_state['username']}.json"
 
     while not stop_event.is_set():
         try:
@@ -70,16 +70,29 @@ def commenting_worker():
                 
                 if formatted_proxy:
                     cl.set_proxy(formatted_proxy)
-                    # Safely log the proxy host/port without exposing the password
                     safe_log_proxy = formatted_proxy.split('@')[-1]
                     add_log(f"Using Proxy: {safe_log_proxy}")
 
-            # 2. Login (Only if not already logged in)
+            # 2. Login Logic (With Session Saving)
             if not login_successful:
-                add_log(f"Attempting login for {bot_state['username']}...")
-                cl.login(bot_state["username"], bot_state["password"])
-                login_successful = True
-                add_log("Login successful!")
+                if os.path.exists(session_file):
+                    add_log("Found existing session file, attempting to load...")
+                    cl.load_settings(session_file)
+                    try:
+                        # Test if the session is still valid
+                        cl.get_timeline_feed()
+                        login_successful = True
+                        add_log("Logged in successfully using saved session cookie!")
+                    except Exception:
+                        add_log("Saved session expired or invalid. Re-logging in...")
+                        login_successful = False
+
+                if not login_successful:
+                    add_log(f"Attempting fresh password login for {bot_state['username']}...")
+                    cl.login(bot_state["username"], bot_state["password"])
+                    cl.dump_settings(session_file) # Save session for next time
+                    login_successful = True
+                    add_log("Fresh login successful! Session saved.")
 
             # 3. Process URLs
             for url in bot_state["urls"]:
@@ -90,29 +103,36 @@ def commenting_worker():
                 add_log(f"Targeting URL: {url}")
                 
                 try:
-                    # Extract Media ID from URL and post
                     media_id = cl.media_id(cl.media_pk_from_url(url))
                     comment_obj = cl.media_comment(media_id, comment)
                     add_log(f"SUCCESS: Commented '{comment}' on {url}")
                 except Exception as e:
                     add_log(f"FAILED on {url} - {str(e)[:100]}")
 
-                # Anti-Ban Delay between comments (30 to 60 seconds)
+                # Anti-Ban Delay (30 to 60 seconds)
                 delay = random.randint(30, 60)
                 add_log(f"Sleeping for {delay} seconds to prevent ban...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
                     time.sleep(1)
 
-            add_log("Finished looping through all URLs. Restarting loop...")
-            time.sleep(10) # Pause before restarting the loop
+            add_log("Finished loop through all URLs. Restarting in 10s...")
+            time.sleep(10)
 
         except Exception as e:
-            # Print full traceback to console for deep debugging
             traceback.print_exc()
-            add_log(f"CRITICAL ERROR: {str(e)}")
+            error_msg = str(e)
+            add_log(f"CRITICAL ERROR: {error_msg[:150]}")
             add_log("Cooling down for 60 seconds before retrying...")
-            login_successful = False # Force re-login
+            
+            login_successful = False # Force a re-login check on next loop
+            
+            # Delete corrupted session file if Instagram blocked the session
+            if "challenge" in error_msg.lower() or "blacklist" in error_msg.lower() or "login" in error_msg.lower():
+                 if os.path.exists(session_file):
+                     os.remove(session_file)
+                     add_log("Deleted invalid session file. Will perform fresh login next cycle.")
+                     
             for _ in range(60):
                 if stop_event.is_set(): break
                 time.sleep(1)
@@ -121,7 +141,7 @@ def commenting_worker():
     add_log("Bot thread stopped.")
 
 
-# --- Web Routes ---
+# --- Web Routes & HTML ---
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
