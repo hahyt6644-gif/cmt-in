@@ -4,7 +4,7 @@ import threading
 import time
 import random
 import traceback
-import os
+import re
 
 app = Flask(__name__)
 
@@ -16,7 +16,8 @@ bot_state = {
     "comments": [],
     "proxies": [],
     "status": "Stopped",
-    "logs": []
+    "logs": [],
+    "data_bytes_used": 0  # Tracks data usage
 }
 
 stop_event = threading.Event()
@@ -25,95 +26,138 @@ bot_thread = None
 def add_log(message):
     print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
-    # Keep only the last 50 logs in memory
     if len(bot_state["logs"]) > 50:
         bot_state["logs"].pop()
+
+def format_bytes(size):
+    """Converts bytes to KB or MB for easy reading"""
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.2f} KB"
+    else:
+        return f"{size / (1024 * 1024):.2f} MB"
+
+def data_tracker_hook(r, *args, **kwargs):
+    """Intercepts Instagram requests to calculate proxy data usage"""
+    try:
+        # Calculate size of the outgoing request
+        req_size = len(r.request.url) + len(str(r.request.headers))
+        if r.request.body:
+            req_size += len(r.request.body)
+            
+        # Calculate size of the incoming response
+        res_size = len(str(r.headers)) + len(r.content)
+        
+        total_action_data = req_size + res_size
+        bot_state["data_bytes_used"] += total_action_data
+    except Exception:
+        pass
+
+def get_id_from_url_offline(url):
+    """ZERO-DATA: Converts IG URL to Media ID using math instead of the proxy"""
+    try:
+        match = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9\-_]+)", url)
+        if not match:
+            return url if url.isdigit() else None
+        
+        shortcode = match.group(1)
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+        media_pk = 0
+        for char in shortcode:
+            media_pk = (media_pk * 64) + alphabet.index(char)
+        return str(media_pk)
+    except Exception:
+        return None
 
 def format_proxy(raw_proxy):
     """Converts OwlProxy format to standard Requests SOCKS5 format"""
     try:
         raw_proxy = raw_proxy.strip()
         if not raw_proxy: return None
-        
         if "://" in raw_proxy:
             rest = raw_proxy.split("://")[1]
         else:
             rest = raw_proxy
-            
         parts = rest.split(":")
         if len(parts) == 4:
             host, port, user, password = parts
             return f"socks5://{user}:{password}@{host}:{port}"
-        
         return raw_proxy
-    except Exception as e:
-        add_log(f"Proxy Parse Error: {e}")
+    except Exception:
         return None
 
 def commenting_worker():
-    add_log("Bot thread started.")
+    add_log("Bot started in Low-Data Mode.")
     bot_state["status"] = "Running"
     
     cl = Client()
+    
+    # 1. LOW DATA SETTING: Disable background sync
+    cl.is_sync_enabled = False 
+    
+    # 2. ATTACH DATA TRACKER: Count every byte sent/received
+    cl.private.hooks['response'].append(data_tracker_hook)
+    cl.public.hooks['response'].append(data_tracker_hook)
+
     login_successful = False
 
     while not stop_event.is_set():
         try:
-            # 1. Select a random proxy and apply it
+            # Setup Proxy
             if bot_state["proxies"]:
                 raw_proxy = random.choice(bot_state["proxies"])
                 formatted_proxy = format_proxy(raw_proxy)
-                
                 if formatted_proxy:
                     cl.set_proxy(formatted_proxy)
-                    safe_log_proxy = formatted_proxy.split('@')[-1]
-                    add_log(f"Using Proxy: {safe_log_proxy}")
+                    add_log(f"Using Proxy: {formatted_proxy.split('@')[-1]}")
 
-            # 2. Login Logic (Using Session ID)
+            # Session ID Login
             if not login_successful:
-                add_log(f"Attempting login using Session ID for {bot_state['username']}...")
-                
-                # Clean the session ID of any accidental spaces or newlines
+                add_log(f"Logging in with Session ID...")
                 clean_session = bot_state["sessionid"].replace("\n", "").replace(" ", "").strip()
-                
-                # Login bypasses the password screen entirely
                 cl.login_by_sessionid(clean_session)
                 login_successful = True
-                add_log("Session ID Login Successful! Bypassed security.")
+                add_log("Session Login Successful!")
 
-            # 3. Process URLs
+            # Process URLs
             for url in bot_state["urls"]:
                 if stop_event.is_set():
                     break
                 
+                # 3. LOW DATA SETTING: Offline Math ID calculation
+                media_id = get_id_from_url_offline(url)
+                if not media_id:
+                    add_log(f"Skipping invalid URL: {url}")
+                    continue
+
                 comment = random.choice(bot_state["comments"])
-                add_log(f"Targeting URL: {url}")
+                add_log(f"Targeting Offline ID: {media_id}")
+                
+                # Start tracking data just for this comment
+                data_before = bot_state["data_bytes_used"]
                 
                 try:
-                    media_id = cl.media_id(cl.media_pk_from_url(url))
                     cl.media_comment(media_id, comment)
-                    add_log(f"SUCCESS: Commented '{comment}' on {url}")
+                    
+                    data_used_this_action = bot_state["data_bytes_used"] - data_before
+                    add_log(f"SUCCESS: Commented '{comment}' | Data Used: {format_bytes(data_used_this_action)}")
                 except Exception as e:
-                    add_log(f"FAILED on {url} - {str(e)[:100]}")
+                    add_log(f"FAILED on {url} - {str(e)[:50]}")
 
-                # Anti-Ban Delay (30 to 60 seconds)
-                delay = random.randint(30, 60)
-                add_log(f"Sleeping for {delay} seconds to prevent ban...")
+                # Safe Delay
+                delay = random.randint(60, 120)
+                add_log(f"Sleeping for {delay} seconds...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
                     time.sleep(1)
 
-            add_log("Finished loop through all URLs. Restarting in 10s...")
-            time.sleep(10)
+            add_log("Finished URL loop. Restarting in 30s...")
+            time.sleep(30)
 
         except Exception as e:
-            traceback.print_exc()
-            error_msg = str(e)
-            add_log(f"CRITICAL ERROR: {error_msg[:150]}")
-            add_log("Cooling down for 60 seconds before retrying...")
-            
-            login_successful = False # Force a re-login check on next loop
-            
+            add_log(f"CRITICAL ERROR: {str(e)[:100]}")
+            login_successful = False # Force login check
             for _ in range(60):
                 if stop_event.is_set(): break
                 time.sleep(1)
@@ -130,7 +174,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMM Auto-Comment Panel</title>
+    <title>SMM Auto-Comment Pro</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { padding-top: 20px; }
@@ -146,11 +190,11 @@ HTML_TEMPLATE = """
             font-size: 14px;
         }
         textarea { font-family: monospace; }
-        .card { box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .data-badge { background-color: #17a2b8; color: white; padding: 5px 10px; border-radius: 5px; font-weight: bold; }
     </style>
 </head>
 <body class="container">
-    <h2 class="mb-4 text-center text-info fw-bold">SMM Comment Automation</h2>
+    <h2 class="mb-4 text-center text-info fw-bold">SMM Auto-Comment (Low Data Mode)</h2>
     
     <div class="row">
         <div class="col-lg-6 mb-4">
@@ -160,24 +204,24 @@ HTML_TEMPLATE = """
                     <div class="row mb-3">
                         <div class="col-4">
                             <label class="form-label text-secondary small mb-1">IG Username</label>
-                            <input type="text" id="username" class="form-control" placeholder="username" required>
+                            <input type="text" id="username" class="form-control" required>
                         </div>
                         <div class="col-8">
-                            <label class="form-label text-warning small mb-1">IG Session ID (Cookie)</label>
-                            <input type="password" id="sessionid" class="form-control" placeholder="Paste long session cookie here..." required>
+                            <label class="form-label text-warning small mb-1">IG Session ID</label>
+                            <input type="password" id="sessionid" class="form-control" required>
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label text-secondary small mb-1">Video URLs (One per line)</label>
+                        <label class="form-label text-secondary small mb-1">Video URLs</label>
                         <textarea id="urls" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label text-secondary small mb-1">Comments (One per line)</label>
+                        <label class="form-label text-secondary small mb-1">Comments</label>
                         <textarea id="comments" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (Extract 4 lines at 90m rotation)</label>
-                        <textarea id="proxies" class="form-control" rows="3" placeholder="Agreement://Host IP:Port:Username:Password"></textarea>
+                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (90m Rotation)</label>
+                        <textarea id="proxies" class="form-control" rows="3" placeholder="Agreement://Host IP:Port:User:Pass"></textarea>
                     </div>
                     <button type="submit" class="btn btn-primary w-100 mb-3 fw-bold">Save Configuration</button>
                 </form>
@@ -192,11 +236,13 @@ HTML_TEMPLATE = """
         <div class="col-lg-6">
             <div class="card p-4 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h4 class="m-0 text-light">Status Dashboard</h4>
-                    <span id="statusBadge" class="badge bg-secondary fs-6">Stopped</span>
+                    <h4 class="m-0 text-light">Live Dashboard</h4>
+                    <div>
+                        <span id="dataBadge" class="data-badge me-2">Data: 0 KB</span>
+                        <span id="statusBadge" class="badge bg-secondary fs-6">Stopped</span>
+                    </div>
                 </div>
                 <hr class="mt-0">
-                <h5 class="text-secondary mb-3">Live Terminal</h5>
                 <div id="logBox" class="log-box"></div>
             </div>
         </div>
@@ -218,29 +264,22 @@ HTML_TEMPLATE = """
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data)
             });
-            alert('Configuration Saved! Ready to Start.');
+            alert('Saved! Ready to Start.');
         });
 
-        async function startBot() {
-            await fetch('/api/start', {method: 'POST'});
-            updateUI();
-        }
-
-        async function stopBot() {
-            await fetch('/api/stop', {method: 'POST'});
-            updateUI();
-        }
+        async function startBot() { await fetch('/api/start', {method: 'POST'}); updateUI(); }
+        async function stopBot() { await fetch('/api/stop', {method: 'POST'}); updateUI(); }
 
         async function updateUI() {
             const res = await fetch('/api/status');
             const data = await res.json();
             
-            const badge = document.getElementById('statusBadge');
-            badge.innerText = data.status;
-            badge.className = 'badge fs-6 ' + (data.status === 'Running' ? 'bg-success' : 'bg-danger');
+            const statusBadge = document.getElementById('statusBadge');
+            statusBadge.innerText = data.status;
+            statusBadge.className = 'badge fs-6 ' + (data.status === 'Running' ? 'bg-success' : 'bg-danger');
 
-            const logBox = document.getElementById('logBox');
-            logBox.innerHTML = data.logs.join('<br>');
+            document.getElementById('dataBadge').innerText = 'Data: ' + data.data_formatted;
+            document.getElementById('logBox').innerHTML = data.logs.join('<br>');
         }
 
         setInterval(updateUI, 2000);
@@ -269,9 +308,6 @@ def start_bot():
     if bot_state["status"] == "Running":
         return jsonify({"error": "Already running"})
     
-    if not bot_state["username"] or not bot_state["sessionid"] or not bot_state["urls"]:
-        return jsonify({"error": "Missing configuration"})
-
     stop_event.clear()
     bot_thread = threading.Thread(target=commenting_worker)
     bot_thread.daemon = True
@@ -282,14 +318,15 @@ def start_bot():
 def stop_bot():
     if bot_state["status"] == "Running":
         stop_event.set()
-        add_log("Stop signal sent. Waiting for current task to finish...")
+        add_log("Stopping bot after current task...")
     return jsonify({"success": True})
 
 @app.route("/api/status", methods=["GET"])
 def get_status():
     return jsonify({
         "status": bot_state["status"],
-        "logs": bot_state["logs"]
+        "logs": bot_state["logs"],
+        "data_formatted": format_bytes(bot_state["data_bytes_used"])
     })
 
 if __name__ == "__main__":
