@@ -8,6 +8,7 @@ import re
 
 app = Flask(__name__)
 
+# --- Global State ---
 bot_state = {
     "sessionid": "",
     "targets": [],
@@ -18,10 +19,10 @@ bot_state = {
     "data_bytes_used": 0
 }
 
-post_id_cache = {} 
 stop_event = threading.Event()
 
 def add_log(message):
+    print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
     if len(bot_state["logs"]) > 50: bot_state["logs"].pop()
 
@@ -30,6 +31,7 @@ def format_bytes(size):
     return f"{size / 1024:.2f} KB"
 
 def data_tracker_hook(r, *args, **kwargs):
+    """Hooks into every request to track proxy data usage"""
     try:
         req = len(r.request.url) + len(str(r.request.headers)) + len(r.request.body or "")
         res = len(str(r.headers)) + len(r.content)
@@ -37,7 +39,7 @@ def data_tracker_hook(r, *args, **kwargs):
     except: pass
 
 def get_id_offline(url):
-    """Math conversion - 0 KB Data used"""
+    """Math conversion logic - 0 KB Proxy Data used"""
     try:
         if not url or not isinstance(url, str): return None
         clean_url = url.strip().split("?")[0]
@@ -62,32 +64,41 @@ def format_proxy(raw_proxy):
     except: return None
 
 def commenting_worker():
-    add_log("Bot starting: 5-7 Min Delay Mode")
+    add_log("Bot starting: Steady-Proxy & Low-Data Mode")
     bot_state["status"] = "Running"
     
     cl = Client()
-    # Matching Indian Mobile User-Agent
+    # Set Indian Mobile User-Agent to match OwlProxy location
     cl.set_user_agent("Instagram 219.0.0.12.117 Android (29/10; 480dpi; 1080x2280; vivo; V2031; v2031; qcom; en_IN; 332155050)")
     cl.is_sync_enabled = False 
+    
     cl.private.hooks['response'].append(data_tracker_hook)
     cl.public.hooks['response'].append(data_tracker_hook)
     
     login_successful = False
+    active_proxy = None
 
     while not stop_event.is_set():
         try:
-            if bot_state["proxies"]:
-                cl.set_proxy(format_proxy(random.choice(bot_state["proxies"])))
+            # 1. Select and stick to ONE proxy to build trust
+            if not active_proxy and bot_state["proxies"]:
+                active_proxy = format_proxy(random.choice(bot_state["proxies"]))
+                add_log(f"Selected Steady Proxy: {active_proxy.split('@')[-1]}")
+            
+            if active_proxy:
+                cl.set_proxy(active_proxy)
 
+            # 2. Secure Login
             if not login_successful:
-                add_log("Connecting Session...")
-                # Auto-clean Session ID to prevent 'Invalid sessionid'
+                add_log("Verifying Session ID...")
+                # Auto-remove spaces and URL encoding from Session ID
                 sid = urllib.parse.unquote(bot_state["sessionid"]).replace(" ", "").replace("\n", "").strip()
                 cl.login_by_sessionid(sid)
                 cl.get_timeline_feed() 
                 login_successful = True
-                add_log("SUCCESS: Session Validated!")
+                add_log("SUCCESS: Session connected!")
 
+            # 3. Commenting Loop
             for item in bot_state["targets"]:
                 if stop_event.is_set(): break
                 
@@ -95,38 +106,45 @@ def commenting_worker():
                 if not mid: continue
 
                 comment = random.choice(bot_state["comments"])
-                before = bot_state["data_bytes_used"]
+                before_data = bot_state["data_bytes_used"]
                 
                 try:
                     cl.media_comment(mid, comment)
-                    used = format_bytes(bot_state["data_bytes_used"] - before)
-                    add_log(f"COMMENTED: {mid} | Data: {used}")
+                    used = format_bytes(bot_state["data_bytes_used"] - before_data)
+                    add_log(f"DONE: {mid} | Data: {used}")
                 except Exception as e:
-                    if "checkpoint" in str(e).lower():
-                        add_log("STOPPED: Checkpoint Required. Open IG app.")
+                    err = str(e).lower()
+                    if "checkpoint" in err or "challenge" in err:
+                        add_log("STOPPED: Checkpoint required. Open your IG app!")
                         bot_state["status"] = "Stopped"
                         stop_event.set()
                         return
                     add_log(f"ERR: {str(e)[:40]}")
 
-                # 5-7 MINUTE DELAY (300 to 420 seconds)
+                # 4. 5-7 MINUTE DELAY
                 delay = random.randint(300, 420)
                 add_log(f"Waiting {delay // 60}m {delay % 60}s...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
                     time.sleep(1)
 
-            add_log("List finished. Resting 10m...")
+            add_log("List completed. Resting 10 minutes...")
             time.sleep(600)
 
         except Exception as e:
+            err_msg = str(e).lower()
             add_log(f"CRITICAL: {str(e)[:50]}")
+            if "checkpoint" in err_msg or "login_required" in err_msg:
+                bot_state["status"] = "Stopped"
+                stop_event.set()
+                break
             login_successful = False
+            active_proxy = None # Try a new proxy on next attempt
             time.sleep(60)
 
     bot_state["status"] = "Stopped"
 
-# --- Web Interface ---
+# --- Web UI ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
@@ -144,10 +162,14 @@ HTML_TEMPLATE = """
         <div class="col-md-5">
             <div class="card p-3 mb-3">
                 <h6 class="text-info">Configuration</h6>
-                <input type="text" id="sid" class="form-control mb-2" placeholder="Paste Session ID">
-                <textarea id="targets" class="form-control mb-2" rows="5" placeholder="URLs (one per line)"></textarea>
-                <textarea id="msgs" class="form-control mb-2" rows="3" placeholder="Comments"></textarea>
-                <textarea id="px" class="form-control mb-2" rows="3" placeholder="Proxies"></textarea>
+                <label class="small text-secondary">Session ID</label>
+                <input type="text" id="sid" class="form-control mb-2" placeholder="Paste New Session ID">
+                <label class="small text-secondary">Video URLs</label>
+                <textarea id="targets" class="form-control mb-2" rows="5"></textarea>
+                <label class="small text-secondary">Comments</label>
+                <textarea id="msgs" class="form-control mb-2" rows="3"></textarea>
+                <label class="small text-secondary">Proxies</label>
+                <textarea id="px" class="form-control mb-2" rows="3"></textarea>
                 <button onclick="save()" class="btn btn-primary w-100 mb-2">Save Settings</button>
                 <div class="d-flex gap-2">
                     <button onclick="start()" class="btn btn-success w-100 fw-bold">START BOT</button>
@@ -156,9 +178,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="col-md-7">
-            <div class="card p-3 mb-3 bg-dark d-flex justify-content-between flex-row">
-                <span>Status: <b id="st">Stopped</b></span>
-                <span>Data Used: <span id="db" class="data-text">0 B</span></span>
+            <div class="card p-3 mb-3 bg-dark d-flex justify-content-between flex-row align-items-center">
+                <span>Status: <b id="st" class="badge bg-secondary">Stopped</b></span>
+                <span>Session Data Used: <span id="db" class="data-text">0 B</span></span>
             </div>
             <div id="logs" class="log-box"></div>
         </div>
@@ -175,7 +197,7 @@ HTML_TEMPLATE = """
                     proxies: document.getElementById('px').value.split('\\n').filter(x=>x.trim())
                 })
             });
-            alert("Configuration Saved!");
+            alert("Settings Saved!");
         }
         async function start() { await fetch('/api/start', {method:'POST'}); }
         async function stop() { await fetch('/api/stop', {method:'POST'}); }
@@ -183,6 +205,7 @@ HTML_TEMPLATE = """
             const r = await fetch('/api/status');
             const d = await r.json();
             document.getElementById('st').innerText = d.status;
+            document.getElementById('st').className = 'badge ' + (d.status === 'Running' ? 'bg-success' : 'bg-danger');
             document.getElementById('db').innerText = d.data_formatted;
             document.getElementById('logs').innerHTML = d.logs.join('<br>');
         }, 2000);
@@ -224,4 +247,3 @@ def get_status():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-    
