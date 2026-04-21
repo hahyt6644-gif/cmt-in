@@ -71,20 +71,16 @@ def get_id_from_url_offline(url):
         return None
 
 def format_proxy(raw_proxy):
-    """Converts OwlProxy format to standard Requests SOCKS5 format"""
     try:
-        raw_proxy = raw_proxy.strip()
-        if not raw_proxy: return None
-        if "://" in raw_proxy:
-            rest = raw_proxy.split("://")[1]
-        else:
-            rest = raw_proxy
-        parts = rest.split(":")
+        # Clean the string from any whitespace or 'socks5://' prefixes
+        clean_px = raw_proxy.strip().replace("socks5://", "").replace("http://", "")
+        parts = clean_px.split(":")
+        
+        # If it's Host:Port:User:Pass
         if len(parts) == 4:
-            host, port, user, password = parts
-            return f"socks5://{user}:{password}@{host}:{port}"
+            return f"socks5://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
         return raw_proxy
-    except Exception:
+    except:
         return None
 
 def commenting_worker():
