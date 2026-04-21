@@ -1,5 +1,6 @@
 from flask import Flask, render_template_string, request, jsonify
 from instagrapi import Client
+import urllib.parse
 import threading
 import time
 import random
@@ -7,11 +8,9 @@ import re
 
 app = Flask(__name__)
 
-# --- Global State ---
 bot_state = {
-    "username": "",
     "sessionid": "",
-    "targets": [],  # Can be URLs or @usernames
+    "targets": [],
     "comments": [],
     "proxies": [],
     "status": "Stopped",
@@ -19,7 +18,6 @@ bot_state = {
     "data_bytes_used": 0
 }
 
-# Cache to store Post IDs found via @username
 post_id_cache = {} 
 stop_event = threading.Event()
 
@@ -33,7 +31,6 @@ def format_bytes(size):
     return f"{size / 1024:.2f} KB"
 
 def data_tracker_hook(r, *args, **kwargs):
-    """Counts every byte of request/response to show live proxy usage"""
     try:
         req = len(r.request.url) + len(str(r.request.headers)) + len(r.request.body or "")
         res = len(str(r.headers)) + len(r.content)
@@ -41,37 +38,22 @@ def data_tracker_hook(r, *args, **kwargs):
     except: pass
 
 def get_id_offline(url):
-    """FIXED: Zero-Data Math converter with high safety. 0 KB Proxy Data."""
     try:
         if not url or not isinstance(url, str): return None
-        url = url.strip()
-        
-        # 1. Clean the URL of tracking parameters (like ?igsh=...)
-        clean_url = url.split("?")[0]
-        
-        # 2. Extract shortcode
-        # This regex handles /p/, /reel/, and /tv/ formats
+        clean_url = url.strip().split("?")[0]
         match = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9\-_]+)", clean_url)
+        if match: shortcode = match.group(1)
+        elif len(clean_url) <= 15 and not "/" in clean_url: shortcode = clean_url
+        else: return clean_url if clean_url.isdigit() else None
         
-        if match:
-            shortcode = match.group(1)
-        elif len(clean_url) <= 15 and not "/" in clean_url:
-            shortcode = clean_url
-        else:
-            # Fallback: Check if input is already a numeric ID
-            return clean_url if clean_url.isdigit() else None
-        
-        # 3. Math conversion logic
         alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
         media_pk = 0
         for char in shortcode:
             media_pk = (media_pk * 64) + alphabet.index(char)
         return str(media_pk)
-    except:
-        return None
+    except: return None
 
 def format_proxy(raw_proxy):
-    """Standardizes proxy format for instagrapi"""
     try:
         clean_px = raw_proxy.strip().replace("socks5://", "").replace("http://", "")
         parts = clean_px.split(":")
@@ -81,14 +63,12 @@ def format_proxy(raw_proxy):
     except: return None
 
 def commenting_worker():
-    add_log("Bot starting: Ultra-Low Data Mode")
+    add_log("Bot starting: Auto-Cleaning Mode")
     bot_state["status"] = "Running"
     
     cl = Client()
-    # Indian Mobile Device User-Agent for better proxy trust
     cl.set_user_agent("Instagram 219.0.0.12.117 Android (29/10; 480dpi; 1080x2280; vivo; V2031; v2031; qcom; en_IN; 332155050)")
-    
-    cl.is_sync_enabled = False # Block profile background data
+    cl.is_sync_enabled = False 
     cl.private.hooks['response'].append(data_tracker_hook)
     cl.public.hooks['response'].append(data_tracker_hook)
     
@@ -101,53 +81,68 @@ def commenting_worker():
                 if p: cl.set_proxy(p)
 
             if not login_successful:
-                add_log("Connecting via Session ID...")
-                sid = bot_state["sessionid"].strip().replace("\n", "").replace(" ", "")
-                cl.login_by_sessionid(sid)
+                add_log("Connecting & Verifying Session...")
                 
-                # Test the session
-                cl.get_timeline_feed()
+                # AGGRESSIVE SESSION ID CLEANING
+                raw_sid = bot_state["sessionid"]
+                clean_sid = urllib.parse.unquote(raw_sid).replace(" ", "").replace("\n", "").replace('"', '').replace("'", "").strip()
+                
+                cl.login_by_sessionid(clean_sid)
+                cl.get_timeline_feed() # Test it
                 login_successful = True
                 add_log("Session Validated! Login Successful.")
 
             for item in bot_state["targets"]:
                 if stop_event.is_set(): break
-                
                 final_ids = []
-                # CASE: @Username (Fetch once, cache forever)
+                
                 if item.startswith("@"):
                     user = item.replace("@", "").strip()
                     if user not in post_id_cache:
-                        add_log(f"Proxy Scan for @{user}...")
+                        add_log(f"Scanning @{user}...")
                         uid = cl.user_id_from_username(user)
                         medias = cl.user_medias(uid, 3) 
                         post_id_cache[user] = [m.id for m in medias]
                     final_ids = post_id_cache[user]
                 else:
-                    # CASE: URL (Zero-Data Math)
                     mid = get_id_offline(item)
                     if mid: final_ids = [mid]
 
                 for mid in final_ids:
                     if stop_event.is_set(): break
                     comment = random.choice(bot_state["comments"])
-                    
                     before = bot_state["data_bytes_used"]
                     try:
                         cl.media_comment(mid, comment)
                         used = format_bytes(bot_state["data_bytes_used"] - before)
                         add_log(f"DONE: {mid} | Used: {used}")
                     except Exception as e:
-                        add_log(f"ERR: {str(e)[:40]}")
+                        err_str = str(e).lower()
+                        if "feedback_required" in err_str:
+                            add_log("Rate Limit! Sleeping 10 mins...")
+                            time.sleep(600)
+                        else:
+                            add_log(f"ERR: {str(e)[:40]}")
+                            # Raise checkpoints to the main try/except block
+                            if "checkpoint" in err_str or "challenge" in err_str:
+                                raise Exception(e)
 
-                    # Delay to prevent bans
                     time.sleep(random.randint(60, 120))
 
             add_log("Cycle complete. Resting...")
             time.sleep(300)
 
         except Exception as e:
+            err_msg = str(e).lower()
             add_log(f"CRITICAL: {str(e)[:50]}")
+            
+            # STOP THE BOT IF CHECKPOINT HAPPENS
+            if "checkpoint_required" in err_msg or "challenge" in err_msg:
+                add_log("STOPPING: IG needs SMS/Email verification! Open your app.")
+                bot_state["status"] = "Stopped"
+                stop_event.set()
+                break
+                
             login_successful = False
             time.sleep(60)
 
