@@ -22,7 +22,6 @@ post_id_cache = {}
 stop_event = threading.Event()
 
 def add_log(message):
-    print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
     if len(bot_state["logs"]) > 50: bot_state["logs"].pop()
 
@@ -38,12 +37,12 @@ def data_tracker_hook(r, *args, **kwargs):
     except: pass
 
 def get_id_offline(url):
+    """Math conversion - 0 KB Data used"""
     try:
         if not url or not isinstance(url, str): return None
         clean_url = url.strip().split("?")[0]
         match = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9\-_]+)", clean_url)
         if match: shortcode = match.group(1)
-        elif len(clean_url) <= 15 and not "/" in clean_url: shortcode = clean_url
         else: return clean_url if clean_url.isdigit() else None
         
         alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
@@ -63,10 +62,11 @@ def format_proxy(raw_proxy):
     except: return None
 
 def commenting_worker():
-    add_log("Bot starting: Auto-Cleaning Mode")
+    add_log("Bot starting: 5-7 Min Delay Mode")
     bot_state["status"] = "Running"
     
     cl = Client()
+    # Matching Indian Mobile User-Agent
     cl.set_user_agent("Instagram 219.0.0.12.117 Android (29/10; 480dpi; 1080x2280; vivo; V2031; v2031; qcom; en_IN; 332155050)")
     cl.is_sync_enabled = False 
     cl.private.hooks['response'].append(data_tracker_hook)
@@ -77,72 +77,50 @@ def commenting_worker():
     while not stop_event.is_set():
         try:
             if bot_state["proxies"]:
-                p = format_proxy(random.choice(bot_state["proxies"]))
-                if p: cl.set_proxy(p)
+                cl.set_proxy(format_proxy(random.choice(bot_state["proxies"])))
 
             if not login_successful:
-                add_log("Connecting & Verifying Session...")
-                
-                # AGGRESSIVE SESSION ID CLEANING
-                raw_sid = bot_state["sessionid"]
-                clean_sid = urllib.parse.unquote(raw_sid).replace(" ", "").replace("\n", "").replace('"', '').replace("'", "").strip()
-                
-                cl.login_by_sessionid(clean_sid)
-                cl.get_timeline_feed() # Test it
+                add_log("Connecting Session...")
+                # Auto-clean Session ID to prevent 'Invalid sessionid'
+                sid = urllib.parse.unquote(bot_state["sessionid"]).replace(" ", "").replace("\n", "").strip()
+                cl.login_by_sessionid(sid)
+                cl.get_timeline_feed() 
                 login_successful = True
-                add_log("Session Validated! Login Successful.")
+                add_log("SUCCESS: Session Validated!")
 
             for item in bot_state["targets"]:
                 if stop_event.is_set(): break
-                final_ids = []
                 
-                if item.startswith("@"):
-                    user = item.replace("@", "").strip()
-                    if user not in post_id_cache:
-                        add_log(f"Scanning @{user}...")
-                        uid = cl.user_id_from_username(user)
-                        medias = cl.user_medias(uid, 3) 
-                        post_id_cache[user] = [m.id for m in medias]
-                    final_ids = post_id_cache[user]
-                else:
-                    mid = get_id_offline(item)
-                    if mid: final_ids = [mid]
+                mid = get_id_offline(item)
+                if not mid: continue
 
-                for mid in final_ids:
+                comment = random.choice(bot_state["comments"])
+                before = bot_state["data_bytes_used"]
+                
+                try:
+                    cl.media_comment(mid, comment)
+                    used = format_bytes(bot_state["data_bytes_used"] - before)
+                    add_log(f"COMMENTED: {mid} | Data: {used}")
+                except Exception as e:
+                    if "checkpoint" in str(e).lower():
+                        add_log("STOPPED: Checkpoint Required. Open IG app.")
+                        bot_state["status"] = "Stopped"
+                        stop_event.set()
+                        return
+                    add_log(f"ERR: {str(e)[:40]}")
+
+                # 5-7 MINUTE DELAY (300 to 420 seconds)
+                delay = random.randint(300, 420)
+                add_log(f"Waiting {delay // 60}m {delay % 60}s...")
+                for _ in range(delay):
                     if stop_event.is_set(): break
-                    comment = random.choice(bot_state["comments"])
-                    before = bot_state["data_bytes_used"]
-                    try:
-                        cl.media_comment(mid, comment)
-                        used = format_bytes(bot_state["data_bytes_used"] - before)
-                        add_log(f"DONE: {mid} | Used: {used}")
-                    except Exception as e:
-                        err_str = str(e).lower()
-                        if "feedback_required" in err_str:
-                            add_log("Rate Limit! Sleeping 10 mins...")
-                            time.sleep(600)
-                        else:
-                            add_log(f"ERR: {str(e)[:40]}")
-                            # Raise checkpoints to the main try/except block
-                            if "checkpoint" in err_str or "challenge" in err_str:
-                                raise Exception(e)
+                    time.sleep(1)
 
-                    time.sleep(random.randint(60, 120))
-
-            add_log("Cycle complete. Resting...")
-            time.sleep(300)
+            add_log("List finished. Resting 10m...")
+            time.sleep(600)
 
         except Exception as e:
-            err_msg = str(e).lower()
             add_log(f"CRITICAL: {str(e)[:50]}")
-            
-            # STOP THE BOT IF CHECKPOINT HAPPENS
-            if "checkpoint_required" in err_msg or "challenge" in err_msg:
-                add_log("STOPPING: IG needs SMS/Email verification! Open your app.")
-                bot_state["status"] = "Stopped"
-                stop_event.set()
-                break
-                
             login_successful = False
             time.sleep(60)
 
@@ -154,11 +132,10 @@ HTML_TEMPLATE = """
 <html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMM Ultra-Low Data</title>
+    <title>SMM Ultra-Low Data (5-7m Delay)</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        .log-box { height: 400px; overflow-y: scroll; background: #000; padding: 15px; font-family: monospace; color: #0f0; border: 1px solid #333; font-size: 13px; }
+        .log-box { height: 450px; overflow-y: scroll; background: #000; padding: 15px; font-family: monospace; color: #0f0; border: 1px solid #333; font-size: 13px; }
         .data-text { font-size: 1.2rem; color: #0dcaf0; font-weight: bold; }
     </style>
 </head>
@@ -166,24 +143,22 @@ HTML_TEMPLATE = """
     <div class="row">
         <div class="col-md-5">
             <div class="card p-3 mb-3">
-                <h5 class="text-info">Setup</h5>
-                <input type="text" id="sid" class="form-control mb-2" placeholder="Session ID">
-                <textarea id="targets" class="form-control mb-2" rows="4" placeholder="URLs or @usernames"></textarea>
+                <h6 class="text-info">Configuration</h6>
+                <input type="text" id="sid" class="form-control mb-2" placeholder="Paste Session ID">
+                <textarea id="targets" class="form-control mb-2" rows="5" placeholder="URLs (one per line)"></textarea>
                 <textarea id="msgs" class="form-control mb-2" rows="3" placeholder="Comments"></textarea>
                 <textarea id="px" class="form-control mb-2" rows="3" placeholder="Proxies"></textarea>
-                <button onclick="save()" class="btn btn-primary w-100 mb-2">Save Config</button>
+                <button onclick="save()" class="btn btn-primary w-100 mb-2">Save Settings</button>
                 <div class="d-flex gap-2">
-                    <button onclick="start()" class="btn btn-success w-100">START</button>
-                    <button onclick="stop()" class="btn btn-danger w-100">STOP</button>
+                    <button onclick="start()" class="btn btn-success w-100 fw-bold">START BOT</button>
+                    <button onclick="stop()" class="btn btn-danger w-100 fw-bold">STOP</button>
                 </div>
             </div>
         </div>
         <div class="col-md-7">
-            <div class="card p-3 mb-3 bg-dark">
-                <div class="d-flex justify-content-between">
-                    <span>Status: <b id="st">Stopped</b></span>
-                    <span>Session Data: <span id="db" class="data-text">0 B</span></span>
-                </div>
+            <div class="card p-3 mb-3 bg-dark d-flex justify-content-between flex-row">
+                <span>Status: <b id="st">Stopped</b></span>
+                <span>Data Used: <span id="db" class="data-text">0 B</span></span>
             </div>
             <div id="logs" class="log-box"></div>
         </div>
@@ -200,7 +175,7 @@ HTML_TEMPLATE = """
                     proxies: document.getElementById('px').value.split('\\n').filter(x=>x.trim())
                 })
             });
-            alert("Saved");
+            alert("Configuration Saved!");
         }
         async function start() { await fetch('/api/start', {method:'POST'}); }
         async function stop() { await fetch('/api/stop', {method:'POST'}); }
@@ -249,3 +224,4 @@ def get_status():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+    
