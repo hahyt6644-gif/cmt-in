@@ -146,7 +146,7 @@ def commenting_worker():
                     add_log(f"FAILED on {url} - {str(e)[:50]}")
 
                 # Safe Delay
-                delay = random.randint(60, 120)
+                delay = random.randint(250, 300)
                 add_log(f"Sleeping for {delay} seconds...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
