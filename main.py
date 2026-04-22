@@ -8,8 +8,8 @@ import re
 app = Flask(__name__)
 
 bot_state = {
-    "sessionid": "",
-    "csrftoken": "",
+    "username": "",
+    "password": "",
     "urls": [],
     "comments": [],
     "proxies": [],
@@ -59,11 +59,10 @@ def format_proxy(raw_proxy):
     except: return None
 
 def commenting_worker():
-    add_log("Bot Started: FORCE-INJECTION MODE 🚀")
+    add_log("Bot Started: AUTO-LOGIN MODE 🚀")
     bot_state["status"] = "Running"
     
     cl = Client()
-    # Using a safe, generic Indian Android footprint
     cl.set_user_agent("Instagram 219.0.0.12.117 Android (29/10; 480dpi; 1080x2280; vivo; V2031; v2031; qcom; en_IN; 332155050)")
     cl.is_sync_enabled = False 
     cl.private.hooks['response'].append(data_tracker_hook)
@@ -76,19 +75,22 @@ def commenting_worker():
             add_log(f"Proxy Connected: {active_proxy.split('@')[-1]}")
             time.sleep(2)
 
-    # 2. FORCE COOKIE INJECTION (Bypassing internal login crashes)
-    add_log("Injecting Session & CSRF Directly...")
-    sid = bot_state["sessionid"].replace("sessionid=", "").strip()
-    csrf = bot_state["csrftoken"].replace("csrftoken=", "").strip()
-
-    cl.public.cookies.set('sessionid', sid, domain='.instagram.com')
-    cl.public.cookies.set('csrftoken', csrf, domain='.instagram.com')
-    cl.private.cookies.set('sessionid', sid, domain='.instagram.com')
-    cl.private.cookies.set('csrftoken', csrf, domain='.instagram.com')
-    cl.public.headers.update({"X-CSRFToken": csrf})
-    cl.private.headers.update({"X-CSRFToken": csrf})
-
-    add_log("Auth Injected! Starting Operations...")
+    # 2. AUTO LOGIN WITH USERNAME & PASSWORD
+    try:
+        add_log(f"Logging into account: @{bot_state['username']}...")
+        cl.login(bot_state["username"], bot_state["password"])
+        add_log("✅ SUCCESS: Logged in completely!")
+    except Exception as e:
+        err = str(e).lower()
+        if "challenge" in err or "checkpoint" in err:
+            add_log("🚨 SECURITY ALERT: Instagram blocked the login. Check phone for OTP/Face verification.")
+        elif "bad_password" in err:
+            add_log("❌ ERROR: Incorrect password provided.")
+        else:
+            add_log(f"⚠️ LOGIN FAILED: {err[:50]}")
+        bot_state["status"] = "Stopped"
+        stop_event.set()
+        return
 
     # 3. DIRECT COMMENTING LOOP
     while not stop_event.is_set():
@@ -103,20 +105,13 @@ def commenting_worker():
                 comment_text = random.choice(bot_state["comments"])
                 
                 try:
-                    # Posting comment directly via media_comment
                     cl.media_comment(mid, comment_text)
                     used = format_bytes(bot_state["data_bytes_used"] - before_data)
                     add_log(f"✅ DONE: Commented on {url[-15:]} | Data: {used}")
-                
                 except Exception as e:
                     err = str(e).lower()
                     if "checkpoint" in err or "feedback_required" in err or "challenge" in err:
                         add_log("🚨 ACCOUNT LOCKED: Checkpoint detected.")
-                        bot_state["status"] = "Stopped"
-                        stop_event.set()
-                        return
-                    elif "login_required" in err:
-                        add_log("❌ SESSION DEAD: Please get new Session ID & CSRF.")
                         bot_state["status"] = "Stopped"
                         stop_event.set()
                         return
@@ -140,15 +135,14 @@ def commenting_worker():
 
     bot_state["status"] = "Stopped"
 
-
-# --- WEB DASHBOARD UI ---
+# --- WEB DASHBOARD UI (PRE-FILLED DATA) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMM Automation Bot</title>
+    <title>SMM Automation Bot (Auto-Login)</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { padding-top: 20px; background-color: #0d1117; color: #c9d1d9; }
@@ -157,15 +151,33 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body class="container">
-    <h3 class="mb-4 text-center text-primary fw-bold">🚀 SMM Bot (Force-Injection Mode)</h3>
+    <h3 class="mb-4 text-center text-primary fw-bold">🚀 SMM Bot (Auto-Login Mode)</h3>
     <div class="row">
         <div class="col-lg-5 mb-4">
             <div class="card p-4">
-                <input type="password" id="sid" class="form-control mb-3 bg-dark text-light" placeholder="Session ID (Paste here)" required>
-                <input type="password" id="csrf" class="form-control mb-3 bg-dark text-light" placeholder="CSRF Token (Paste here)" required>
-                <textarea id="urls" class="form-control mb-3 bg-dark text-light" rows="4" placeholder="Paste Video URLs here..." required></textarea>
-                <textarea id="msgs" class="form-control mb-3 bg-dark text-light" rows="2" placeholder="Paste Comments here..." required></textarea>
-                <textarea id="px" class="form-control mb-3 bg-dark text-light" rows="2" placeholder="SOCKS5 Proxy (Host:Port:User:Pass)"></textarea>
+                <input type="text" id="user" class="form-control mb-2 bg-dark text-light" value="movie41525" required>
+                <input type="password" id="pass" class="form-control mb-3 bg-dark text-light" value="amitkr545" required>
+                
+                <textarea id="urls" class="form-control mb-3 bg-dark text-light" rows="4" required>https://www.instagram.com/reel/DW5R3PliAqv
+https://www.instagram.com/reel/DXO2cHoDBSD
+https://www.instagram.com/reel/DXYQ1-lkVhJ
+https://www.instagram.com/reel/DVLaIdhjflg
+https://www.instagram.com/reel/DV2Ud-XDGtW
+https://www.instagram.com/reel/DXOJCSfk9dv
+https://www.instagram.com/reel/DXQten5kyY8
+https://www.instagram.com/reel/DVixLWZEifl
+https://www.instagram.com/reel/DWiX1LLEcBM
+https://www.instagram.com/reel/DXUj1TWIgIt
+https://www.instagram.com/reel/DXUQAEdk-Dq</textarea>
+                
+                <textarea id="msgs" class="form-control mb-3 bg-dark text-light" rows="2" required>Is movie ka link mere bio me hai
+Mast movie hai maine kal hi dekha iska link mere bio me hai</textarea>
+                
+                <textarea id="px" class="form-control mb-3 bg-dark text-light" rows="2">socks5://change5.owlproxy.com:7778:jZjtD6Z4fZ40_custom_zone_IN_st__city_sid_52507250_time_90:2849293
+socks5://change5.owlproxy.com:7778:jZjtD6Z4fZ40_custom_zone_IN_st__city_sid_08351709_time_90:2849293
+socks5://change5.owlproxy.com:7778:jZjtD6Z4fZ40_custom_zone_IN_st__city_sid_36292474_time_90:2849293
+socks5://change5.owlproxy.com:7778:jZjtD6Z4fZ40_custom_zone_IN_st__city_sid_02785359_time_90:2849293
+socks5://change5.owlproxy.com:7778:jZjtD6Z4fZ40_custom_zone_IN_st__city_sid_22356599_time_90:2849293</textarea>
                 
                 <button onclick="save()" class="btn btn-outline-primary w-100 mb-3 fw-bold">💾 Save Configuration</button>
                 <div class="d-flex gap-2">
@@ -190,8 +202,8 @@ HTML_TEMPLATE = """
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    sessionid: document.getElementById('sid').value,
-                    csrftoken: document.getElementById('csrf').value,
+                    username: document.getElementById('user').value,
+                    password: document.getElementById('pass').value,
                     urls: document.getElementById('urls').value.split('\\n').filter(x=>x.trim()),
                     comments: document.getElementById('msgs').value.split('\\n').filter(x=>x.trim()),
                     proxies: document.getElementById('px').value.split('\\n').filter(x=>x.trim())
