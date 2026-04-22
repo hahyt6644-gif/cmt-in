@@ -4,7 +4,6 @@ import threading
 import time
 import random
 import traceback
-import os
 
 app = Flask(__name__)
 
@@ -25,98 +24,98 @@ bot_thread = None
 def add_log(message):
     print(message)
     bot_state["logs"].insert(0, f"{time.strftime('%H:%M:%S')} - {message}")
-    # Keep only the last 50 logs in memory
     if len(bot_state["logs"]) > 50:
         bot_state["logs"].pop()
 
 def format_proxy(raw_proxy):
-    """Converts OwlProxy format to standard Requests SOCKS5 format"""
     try:
         raw_proxy = raw_proxy.strip()
         if not raw_proxy: return None
-        
         if "://" in raw_proxy:
             rest = raw_proxy.split("://")[1]
         else:
             rest = raw_proxy
-            
         parts = rest.split(":")
         if len(parts) == 4:
             host, port, user, password = parts
             return f"socks5://{user}:{password}@{host}:{port}"
-        
         return raw_proxy
     except Exception as e:
         add_log(f"Proxy Parse Error: {e}")
         return None
 
 def commenting_worker():
-    add_log("Bot thread started.")
+    add_log("Bot thread started. Anti-Ban Mode Active.")
     bot_state["status"] = "Running"
     
     cl = Client()
-    login_successful = False
+    # Mask the bot as a standard Indian mobile device
+    cl.set_user_agent("Instagram 219.0.0.12.117 Android (29/10; 480dpi; 1080x2280; vivo; V2031; v2031; qcom; en_IN; 332155050)")
+    cl.is_sync_enabled = False # Stops unnecessary background data
+    
+    # ==========================================
+    # 1. ONE-TIME SETUP (Outside the Loop)
+    # ==========================================
+    
+    # Set the Proxy ONCE. It will not switch IPs and trigger flags.
+    if bot_state["proxies"]:
+        formatted_proxy = format_proxy(bot_state["proxies"][0]) # Always uses the FIRST proxy line
+        if formatted_proxy:
+            cl.set_proxy(formatted_proxy)
+            add_log(f"Locked to single proxy: {formatted_proxy.split('@')[-1]}")
 
+    # Set the Session ID ONCE. 
+    try:
+        add_log("Loading Session ID...")
+        clean_session = bot_state["sessionid"].replace("\n", "").replace(" ", "").strip()
+        cl.login_by_sessionid(clean_session)
+        add_log("Session loaded successfully. Starting comments...")
+    except Exception as e:
+        add_log(f"CRITICAL: Failed to load session: {str(e)[:50]}")
+        bot_state["status"] = "Stopped"
+        return
+
+    # ==========================================
+    # 2. COMMENTING LOOP
+    # ==========================================
     while not stop_event.is_set():
         try:
-            # 1. Select a random proxy and apply it
-            if bot_state["proxies"]:
-                raw_proxy = random.choice(bot_state["proxies"])
-                formatted_proxy = format_proxy(raw_proxy)
-                
-                if formatted_proxy:
-                    cl.set_proxy(formatted_proxy)
-                    safe_log_proxy = formatted_proxy.split('@')[-1]
-                    add_log(f"Using Proxy: {safe_log_proxy}")
-
-            # 2. Login Logic (Using Session ID)
-            if not login_successful:
-                add_log(f"Attempting login using Session ID for {bot_state['username']}...")
-                
-                # Clean the session ID of any accidental spaces or newlines
-                clean_session = bot_state["sessionid"].replace("\n", "").replace(" ", "").strip()
-                
-                # Login bypasses the password screen entirely
-                cl.login_by_sessionid(clean_session)
-                login_successful = True
-                add_log("Session ID Login Successful! Bypassed security.")
-
-            # 3. Process URLs
             for url in bot_state["urls"]:
                 if stop_event.is_set():
                     break
                 
                 comment = random.choice(bot_state["comments"])
-                add_log(f"Targeting URL: {url}")
                 
                 try:
                     media_id = cl.media_id(cl.media_pk_from_url(url))
                     cl.media_comment(media_id, comment)
-                    add_log(f"SUCCESS: Commented '{comment}' on {url}")
+                    add_log(f"SUCCESS: Commented '{comment}' on {url[-15:]}")
                 except Exception as e:
-                    add_log(f"FAILED on {url} - {str(e)[:100]}")
+                    error_msg = str(e).lower()
+                    add_log(f"FAILED on url - {error_msg[:50]}")
+                    
+                    # EMERGENCY BRAKE: Stop immediately if IG asks for verification
+                    if "checkpoint" in error_msg or "challenge" in error_msg or "login_required" in error_msg or "feedback_required" in error_msg:
+                        add_log("SECURITY ALERT: Stopping bot to prevent account ban.")
+                        bot_state["status"] = "Stopped"
+                        stop_event.set()
+                        break
 
-                # Anti-Ban Delay (30 to 60 seconds)
-                delay = random.randint(400, 500)
-                add_log(f"Sleeping for {delay} seconds to prevent ban...")
+                # HUMAN DELAY: 3 to 6 minutes between comments
+                delay = random.randint(180, 360)
+                add_log(f"Sleeping for {delay // 60}m {delay % 60}s to prevent ban...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
                     time.sleep(1)
 
-            add_log("Finished loop through all URLs. Restarting in 10s...")
-            time.sleep(10)
+            if not stop_event.is_set():
+                add_log("Finished list. Resting for 10 minutes before restarting list...")
+                time.sleep(600)
 
         except Exception as e:
-            traceback.print_exc()
-            error_msg = str(e)
-            add_log(f"CRITICAL ERROR: {error_msg[:150]}")
-            add_log("Cooling down for 60 seconds before retrying...")
-            
-            login_successful = False # Force a re-login check on next loop
-            
-            for _ in range(60):
-                if stop_event.is_set(): break
-                time.sleep(1)
+            add_log(f"SYSTEM ERROR: {str(e)[:100]}")
+            add_log("Pausing for 2 minutes. Will NOT re-login.")
+            time.sleep(120)
 
     bot_state["status"] = "Stopped"
     add_log("Bot thread stopped.")
@@ -150,7 +149,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body class="container">
-    <h2 class="mb-4 text-center text-info fw-bold">SMM Comment Automation</h2>
+    <h2 class="mb-4 text-center text-info fw-bold">SMM Comment Automation (Anti-Ban)</h2>
     
     <div class="row">
         <div class="col-lg-6 mb-4">
@@ -176,8 +175,8 @@ HTML_TEMPLATE = """
                         <textarea id="comments" class="form-control" rows="3" required></textarea>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxies (Extract 4 lines at 90m rotation)</label>
-                        <textarea id="proxies" class="form-control" rows="3" placeholder="Agreement://Host IP:Port:Username:Password"></textarea>
+                        <label class="form-label text-secondary small mb-1">SOCKS5 Proxy (Bot uses ONLY the 1st line)</label>
+                        <textarea id="proxies" class="form-control" rows="2" placeholder="Agreement://Host IP:Port:Username:Password"></textarea>
                     </div>
                     <button type="submit" class="btn btn-primary w-100 mb-3 fw-bold">Save Configuration</button>
                 </form>
