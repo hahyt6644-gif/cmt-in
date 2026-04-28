@@ -97,7 +97,7 @@ def commenting_worker():
                     add_log(f"FAILED on {url} - {str(e)[:100]}")
 
                 # Anti-Ban Delay (30 to 60 seconds)
-                delay = random.randint(1500, 1800)
+                delay = random.randint(40, 60)
                 add_log(f"Sleeping for {delay} seconds to prevent ban...")
                 for _ in range(delay):
                     if stop_event.is_set(): break
